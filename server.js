@@ -35,7 +35,7 @@ app.get('/api/pedidos', async (req, res) => {
     // Auth: header 'authorization: Token {token}' (não Bearer!)
     // Resposta: { count, next, previous, results: [...] }
     // Pedidos pagos = status_resumido=1
-    const url = `https://${SHOPPUB_LOJA}/api/v1/pedidos/?page=${pagina}&status_resumido=1`;
+    const dataMin = new Date(); dataMin.setDate(dataMin.getDate() - 30); const dataMinStr = dataMin.toISOString().split("T")[0]; const url = `https://${SHOPPUB_LOJA}/api/v1/pedidos/?page=${pagina}&status_resumido=1&min_data=${dataMinStr}`;
 
     try {
       const response = await axios.get(url, {
