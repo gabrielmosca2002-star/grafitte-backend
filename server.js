@@ -144,6 +144,43 @@ app.post('/api/pedidos/:id/status', async (req, res) => {
   }
 });
 
+
+// ============================================================
+// BUSCAR PRODUTOS
+// GET /api/produtos
+// ============================================================
+app.get('/api/produtos', async (req, res) => {
+  try {
+    let todos = [];
+    let pagina = 1;
+    let temProxima = true;
+    const headers = { 'authorization': `Token ${SHOPPUB_TOKEN}`, 'accept': 'application/json' };
+
+    while (temProxima) {
+      const url = `https://${SHOPPUB_LOJA}/api/v1/produtos/?page=${pagina}`;
+      try {
+        const r = await axios.get(url, { headers, timeout: 15000 });
+        if (r.data && r.data.results) {
+          todos = todos.concat(r.data.results);
+          console.log(`Produtos pagina ${pagina}: ${r.data.results.length} (${todos.length}/${r.data.count})`);
+          if (r.data.next && todos.length < r.data.count) { pagina++; await new Promise(x => setTimeout(x, 200)); }
+          else temProxima = false;
+        } else temProxima = false;
+      } catch(e) { console.log(`Erro: ${e.message}`); temProxima = false; }
+    }
+
+    const produtos = todos.map(p => ({
+      id: p.id, nome: p.nome || p.name || '', sku: p.sku || p.codigo || String(p.id),
+      ativo: p.ativo !== false, is_wrapper: p.is_wrapper || false, parent: p.parent || null,
+      atributo_label: p.atributo_label || '', atributo_valor: p.atributo_valor || ''
+    }));
+
+    res.json({ sucesso: true, produtos, total: produtos.length });
+  } catch(err) {
+    res.status(500).json({ sucesso: false, erro: err.message });
+  }
+});
+
 // ============================================================
 // TESTAR CONEXÃO
 // GET /api/testar
