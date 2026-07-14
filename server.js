@@ -11,207 +11,121 @@ const SHOPPUB_LOJA  = process.env.SHOPPUB_LOJA  || 'www.grafittejalecos.com.br';
 app.use(cors());
 app.use(express.json());
 
-// ============================================================
-// ROTA DE SAÚDE
-// ============================================================
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', sistema: 'Grafitte Backend', versao: '1.1.0' });
-});
+const hdrs = () => ({ 'authorization': `Token ${SHOPPUB_TOKEN}`, 'accept': 'application/json' });
+
+app.get('/', (req, res) => res.json({ status: 'ok', versao: '2.1.0' }));
 
 // ============================================================
-// BUSCAR TODOS OS PEDIDOS DOS ÚLTIMOS 30 DIAS (com paginação automática)
-// GET /api/pedidos
+// BUSCA TODAS AS PÁGINAS DE UM ENDPOINT
+// ============================================================
+async function buscarPaginas(urlBase, delay = 250) {
+  let todos = [], pagina = 1;
+  while (true) {
+    try {
+      const r = await axios.get(`${urlBase}&page=${pagina}`, { headers: hdrs(), timeout: 20000 });
+      if (!r.data?.results?.length) break;
+      todos = todos.concat(r.data.results);
+      const total = r.data.count || todos.length;
+      console.log(`  pag ${pagina}: ${r.data.results.length} (${todos.length}/${total})`);
+      if (!r.data.next || todos.length >= total) break;
+      pagina++;
+      await new Promise(x => setTimeout(x, delay));
+    } catch(e) { console.log(`  erro pag ${pagina}: ${e.message}`); break; }
+  }
+  return todos;
+}
+
+// ============================================================
+// PEDIDOS ATIVOS — últimos 60 dias, todos os status relevantes
+// O painel decide o que é ativo baseado no status_resumido
 // ============================================================
 app.get('/api/pedidos', async (req, res) => {
   try {
-    let todosPedidos = [];
-    let sucesso = false;
-
-    // Últimos 30 dias
+    const dias = parseInt(req.query.dias) || 60;
     const dataMin = new Date();
-    dataMin.setDate(dataMin.getDate() - 30);
-    const dataMinStr = dataMin.toISOString().split('T')[0];
+    dataMin.setDate(dataMin.getDate() - dias);
+    const d = dataMin.toISOString().split('T')[0];
 
-    const headers = {
-      'authorization': `Token ${SHOPPUB_TOKEN}`,
-      'accept': 'application/json',
-      'content-type': 'application/json'
-    };
+    console.log(`\nPedidos últimos ${dias} dias (desde ${d})...`);
 
-    let paginaAtual = 1;
-    let temProxima = true;
-    let totalShoppub = 0;
+    // Busca status relevantes:
+    // 0=aberto, 1=pago, 6=em separação, 7=em produção, 12=preparando envio, 13=em customização
+    // 4=despachado, 3=entregue (para histórico)
+    const statusBuscar = [0, 1, 3, 4, 6, 7, 12, 13];
+    let todosPedidos = [];
 
-    console.log(`\nIniciando importacao - desde ${dataMinStr}`);
-
-    while (temProxima) {
-      const url = `https://${SHOPPUB_LOJA}/api/v1/pedidos/?page=${paginaAtual}&status_resumido=1&min_data=${dataMinStr}`;
-
-      try {
-        const response = await axios.get(url, { headers, timeout: 20000 });
-
-        if (response.data && response.data.results) {
-          const resultados = response.data.results;
-          todosPedidos = todosPedidos.concat(resultados);
-          totalShoppub = response.data.count || todosPedidos.length;
-          sucesso = true;
-
-          console.log(`Pagina ${paginaAtual}: ${resultados.length} pedidos (${todosPedidos.length}/${totalShoppub})`);
-
-          if (response.data.next && resultados.length > 0 && todosPedidos.length < totalShoppub) {
-            paginaAtual++;
-            await new Promise(r => setTimeout(r, 250));
-          } else {
-            temProxima = false;
-          }
-        } else {
-          temProxima = false;
-        }
-      } catch (err) {
-        console.log(`Erro pagina ${paginaAtual}: ${err.message}`);
-        temProxima = false;
-      }
+    for (const status of statusBuscar) {
+      const url = `https://${SHOPPUB_LOJA}/api/v1/pedidos/?status_resumido=${status}&min_data=${d}`;
+      console.log(`  Buscando status ${status}...`);
+      const p = await buscarPaginas(url, 200);
+      todosPedidos = todosPedidos.concat(p);
+      if (p.length > 0) console.log(`  → ${p.length} pedidos`);
     }
 
-    if (sucesso) {
-      console.log(`Importacao completa: ${todosPedidos.length} pedidos`);
-      res.json({
-        sucesso: true,
-        pedidos: todosPedidos,
-        total: todosPedidos.length,
-        total_shoppub: totalShoppub,
-        fonte: 'shoppub',
-        periodo: `ultimos 30 dias desde ${dataMinStr}`
-      });
-    } else {
-      res.json({ sucesso: false, pedidos: [], total: 0, mensagem: 'API Shoppub nao respondeu.', fonte: 'erro' });
-    }
+    // Remove duplicatas
+    const unicos = Array.from(new Map(todosPedidos.map(p => [p.id, p])).values());
+    console.log(`\nTotal: ${unicos.length} pedidos`);
 
-  } catch (err) {
-    console.error('Erro geral:', err.message);
-    res.status(500).json({ sucesso: false, erro: err.message });
+    res.json({
+      sucesso: true,
+      pedidos: unicos,
+      total: unicos.length,
+      periodo: `últimos ${dias} dias`
+    });
+  } catch(e) {
+    console.error('Erro:', e.message);
+    res.status(500).json({ sucesso: false, erro: e.message });
   }
 });
 
 // ============================================================
-// BUSCAR PEDIDO ESPECÍFICO
-// GET /api/pedidos/:id
+// HISTÓRICO — 9 meses para PCP e previsão
 // ============================================================
-app.get('/api/pedidos/:id', async (req, res) => {
-  const { id } = req.params;
+app.get('/api/historico', async (req, res) => {
   try {
-    const response = await axios.get(
-      `https://${SHOPPUB_LOJA}/api/v1/pedido/${id}/`,
-      {
-        headers: {
-          'authorization': `Token ${SHOPPUB_TOKEN}`,
-          'accept': 'application/json'
-        },
-        timeout: 10000
-      }
-    );
-    res.json({ sucesso: true, pedido: response.data });
-  } catch (err) {
-    res.status(500).json({ sucesso: false, erro: err.message });
-  }
-});
+    const meses = parseInt(req.query.meses) || 9;
+    const dataMin = new Date();
+    dataMin.setMonth(dataMin.getMonth() - meses);
+    const d = dataMin.toISOString().split('T')[0];
 
-// ============================================================
-// ATUALIZAR STATUS DO PEDIDO
-// POST /api/pedidos/:id/status
-// ============================================================
-app.post('/api/pedidos/:id/status', async (req, res) => {
-  const { id } = req.params;
-  const { status, rastreamento } = req.body;
-  try {
-    const payload = { status };
-    if (rastreamento) payload.tracking_code = rastreamento;
-    const response = await axios.put(
-      `https://${SHOPPUB_LOJA}/api/v1/pedido/${id}/`,
-      payload,
-      {
-        headers: {
-          'authorization': `Token ${SHOPPUB_TOKEN}`,
-          'accept': 'application/json',
-          'content-type': 'application/json'
-        },
-        timeout: 10000
-      }
-    );
-    res.json({ sucesso: true, resposta: response.data });
-  } catch (err) {
-    res.status(500).json({ sucesso: false, erro: err.message });
-  }
-});
+    console.log(`\nHistórico ${meses} meses (desde ${d})...`);
 
-
-// ============================================================
-// BUSCAR PRODUTOS
-// GET /api/produtos
-// ============================================================
-app.get('/api/produtos', async (req, res) => {
-  try {
-    let todos = [];
-    let pagina = 1;
-    let temProxima = true;
-    const headers = { 'authorization': `Token ${SHOPPUB_TOKEN}`, 'accept': 'application/json' };
-
-    while (temProxima) {
-      const url = `https://${SHOPPUB_LOJA}/api/v1/produtos/?page=${pagina}`;
-      try {
-        const r = await axios.get(url, { headers, timeout: 15000 });
-        if (r.data && r.data.results) {
-          todos = todos.concat(r.data.results);
-          console.log(`Produtos pagina ${pagina}: ${r.data.results.length} (${todos.length}/${r.data.count})`);
-          if (r.data.next && todos.length < r.data.count) { pagina++; await new Promise(x => setTimeout(x, 200)); }
-          else temProxima = false;
-        } else temProxima = false;
-      } catch(e) { console.log(`Erro: ${e.message}`); temProxima = false; }
+    // Busca pagos, entregues e despachados
+    let todosPedidos = [];
+    for (const status of [1, 3, 4]) {
+      console.log(`  status ${status}...`);
+      const p = await buscarPaginas(`https://${SHOPPUB_LOJA}/api/v1/pedidos/?status_resumido=${status}&min_data=${d}`, 200);
+      todosPedidos = todosPedidos.concat(p);
     }
 
-    const produtos = todos.map(p => ({
-      id: p.id, nome: p.nome || p.name || '', sku: p.sku || p.codigo || String(p.id),
-      ativo: p.ativo !== false, is_wrapper: p.is_wrapper || false, parent: p.parent || null,
-      atributo_label: p.atributo_label || '', atributo_valor: p.atributo_valor || ''
-    }));
+    const unicos = Array.from(new Map(todosPedidos.map(p => [p.id, p])).values());
+    console.log(`Total histórico: ${unicos.length}`);
 
-    res.json({ sucesso: true, produtos, total: produtos.length });
-  } catch(err) {
-    res.status(500).json({ sucesso: false, erro: err.message });
+    res.json({
+      sucesso: true,
+      pedidos: unicos,
+      total: unicos.length,
+      periodo: `${meses} meses`
+    });
+  } catch(e) {
+    res.status(500).json({ sucesso: false, erro: e.message });
   }
 });
 
 // ============================================================
 // TESTAR CONEXÃO
-// GET /api/testar
 // ============================================================
 app.get('/api/testar', async (req, res) => {
   try {
-    const response = await axios.get(
-      `https://${SHOPPUB_LOJA}/api/v1/pedidos/?page=1`,
-      {
-        headers: {
-          'authorization': `Token ${SHOPPUB_TOKEN}`,
-          'accept': 'application/json'
-        },
-        timeout: 10000
-      }
-    );
+    const r = await axios.get(`https://${SHOPPUB_LOJA}/api/v1/pedidos/?page=1`, { headers: hdrs(), timeout: 10000 });
     res.json({
       sucesso: true,
       mensagem: 'Conexao com Shoppub OK!',
       loja: SHOPPUB_LOJA,
-      total_pedidos: response.data?.count || 0,
-      status_http: response.status
+      total_pedidos: r.data?.count || 0
     });
-  } catch (err) {
-    res.json({
-      sucesso: false,
-      mensagem: 'Falha na conexao com Shoppub',
-      erro: err.response?.data || err.message,
-      status_http: err.response?.status,
-      loja: SHOPPUB_LOJA
-    });
+  } catch(e) {
+    res.json({ sucesso: false, mensagem: 'Falha', erro: e.message, loja: SHOPPUB_LOJA });
   }
 });
 
@@ -219,6 +133,6 @@ app.get('/api/testar', async (req, res) => {
 // START
 // ============================================================
 app.listen(PORT, () => {
-  console.log(`Grafitte Backend rodando na porta ${PORT}`);
-  console.log(`Loja: ${SHOPPUB_LOJA}`);
+  console.log(`\nGrafitte Backend v2.1 porta ${PORT}`);
+  console.log(`Loja: ${SHOPPUB_LOJA}\n`);
 });
