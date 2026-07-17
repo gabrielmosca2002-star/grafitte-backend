@@ -174,41 +174,68 @@ app.get('/api/historico', async (req, res) => {
 app.post('/api/estado', async (req, res) => {
   try {
     const { pedidos, estoque } = req.body;
-    let salvos = 0;
+    
+    if (!pedidos?.length && !Object.keys(estoque||{}).length) {
+      return res.json({ sucesso: true, salvos: 0, msg: 'nada para salvar' });
+    }
 
-    // Salva pedidos
+    console.log(`\nSalvando estado: ${pedidos?.length||0} pedidos, ${Object.keys(estoque||{}).length} SKUs`);
+    let salvos = 0, erros = 0;
+
+    // Salva pedidos em lote para ser mais rápido
     for (const p of (pedidos || [])) {
-      await pool.query(`
-        INSERT INTO pedidos (id, numero, cliente, email, data_pagamento, status_site, status_site_label, status_interno, itens, bordado, entrega, total, etapas, atualizado_em)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
-        ON CONFLICT (id) DO UPDATE SET
-          status_interno = EXCLUDED.status_interno,
-          etapas = EXCLUDED.etapas,
-          atualizado_em = NOW()
-      `, [
-        p.id, p.numero, p.cliente, p.email,
-        p.createdAt, p.statusSite, p.statusSiteLabel,
-        p.status, JSON.stringify(p.itens), JSON.stringify(p.bordado),
-        JSON.stringify(p.entrega), p.total, JSON.stringify(p.etapas)
-      ]);
-      salvos++;
+      try {
+        // Garante que createdAt é string
+        const dataPag = p.createdAt ? new Date(p.createdAt).toISOString() : new Date().toISOString();
+        const total = parseFloat(p.total) || 0;
+        
+        await pool.query(`
+          INSERT INTO pedidos (id, numero, cliente, email, data_pagamento, status_site, status_site_label, status_interno, itens, bordado, entrega, total, etapas, atualizado_em)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+          ON CONFLICT (id) DO UPDATE SET
+            status_interno = EXCLUDED.status_interno,
+            etapas = EXCLUDED.etapas,
+            itens = EXCLUDED.itens,
+            bordado = EXCLUDED.bordado,
+            status_site = EXCLUDED.status_site,
+            status_site_label = EXCLUDED.status_site_label,
+            atualizado_em = NOW()
+        `, [
+          String(p.id), String(p.numero||''), String(p.cliente||''), String(p.email||''),
+          dataPag, parseInt(p.statusSite)||0, String(p.statusSiteLabel||''),
+          String(p.status||'separacao'),
+          JSON.stringify(p.itens||[]),
+          JSON.stringify(p.bordado||{}),
+          JSON.stringify(p.entrega||{}),
+          total,
+          JSON.stringify(p.etapas||{})
+        ]);
+        salvos++;
+      } catch(e) {
+        console.error(`  Erro pedido ${p.id}: ${e.message}`);
+        erros++;
+      }
     }
 
     // Salva estoque
     for (const [sku, dados] of Object.entries(estoque || {})) {
-      await pool.query(`
-        INSERT INTO estoque (sku, saldo, min_seguranca, atualizado_em)
-        VALUES ($1,$2,$3,NOW())
-        ON CONFLICT (sku) DO UPDATE SET
-          saldo = EXCLUDED.saldo,
-          min_seguranca = EXCLUDED.min_seguranca,
-          atualizado_em = NOW()
-      `, [sku, dados.saldo, dados.minSeguranca || 0]);
+      try {
+        await pool.query(`
+          INSERT INTO estoque (sku, saldo, min_seguranca, atualizado_em)
+          VALUES ($1,$2,$3,NOW())
+          ON CONFLICT (sku) DO UPDATE SET
+            saldo = EXCLUDED.saldo,
+            atualizado_em = NOW()
+        `, [String(sku), parseInt(dados.saldo)||0, parseInt(dados.minSeguranca)||0]);
+      } catch(e) {
+        console.error(`  Erro estoque ${sku}: ${e.message}`);
+      }
     }
 
-    res.json({ sucesso: true, salvos });
+    console.log(`  Salvos: ${salvos}, Erros: ${erros}`);
+    res.json({ sucesso: true, salvos, erros });
   } catch(e) {
-    console.error('Erro ao salvar estado:', e.message);
+    console.error('Erro POST /api/estado:', e.message);
     res.status(500).json({ sucesso: false, erro: e.message });
   }
 });
@@ -307,6 +334,42 @@ app.get('/api/testar', async (req, res) => {
     });
   } catch(e) {
     res.json({ sucesso: false, mensagem: 'Falha', erro: e.message });
+  }
+});
+
+// ============================================================
+// ATUALIZAR STATUS DO PEDIDO NO SITE
+// POST /api/pedidos/:id/status
+// Body: { status: 6 } (número do status da Shoppub)
+// ============================================================
+app.post('/api/pedidos/:id/status', async (req, res) => {
+  const { id } = req.params;
+  const { status, etapaInterna } = req.body;
+
+  // Mapeamento etapa interna → status Shoppub
+  const mapaStatus = {
+    'separacao': 6,   // Em Separação
+    'bordado': 13,    // Em Customização
+    'embalagem': 12,  // Preparando para Envio
+    'despachado': 4   // Despachado
+  };
+
+  const statusShoppub = status || mapaStatus[etapaInterna];
+  if (!statusShoppub) {
+    return res.status(400).json({ sucesso: false, erro: 'Status inválido' });
+  }
+
+  try {
+    const r = await axios.put(
+      `https://${SHOPPUB_LOJA}/api/v1/pedido/${id}/`,
+      { status: statusShoppub },
+      { headers: { ...hdrs(), 'content-type': 'application/json' }, timeout: 10000 }
+    );
+    console.log(`Pedido ${id} → status ${statusShoppub} (${etapaInterna})`);
+    res.json({ sucesso: true, pedido_id: id, status: statusShoppub, resposta: r.data });
+  } catch(e) {
+    console.error(`Erro ao atualizar pedido ${id}:`, e.response?.data || e.message);
+    res.status(500).json({ sucesso: false, erro: e.response?.data || e.message });
   }
 });
 
