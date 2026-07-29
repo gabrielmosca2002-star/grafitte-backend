@@ -324,6 +324,44 @@ app.post('/api/estoque/lote', async (req, res) => {
 });
 
 // ============================================================
+// VERIFICAR STATUS ATUAL DE PEDIDOS NO SITE
+// POST /api/pedidos/status-check
+// ============================================================
+app.post('/api/pedidos/status-check', async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!ids?.length) return res.json({ sucesso: true, pedidos: [] });
+
+    console.log(`Verificando status de ${ids.length} pedidos...`);
+    const resultados = [];
+
+    for (const id of ids.slice(0, 100)) {
+      try {
+        const r = await axios.get(
+          `https://${SHOPPUB_LOJA}/api/v1/pedido/${id}/`,
+          { headers: hdrs(), timeout: 8000 }
+        );
+        if (r.data) {
+          resultados.push({
+            id: String(r.data.id),
+            shoppub_id: r.data.shoppub_id,
+            status: r.data.status,
+            status_resumido: r.data.status_resumido
+          });
+        }
+      } catch(e) {
+        console.log(`  Erro ${id}: ${e.message}`);
+      }
+      await new Promise(x => setTimeout(x, 100));
+    }
+
+    res.json({ sucesso: true, pedidos: resultados });
+  } catch(e) {
+    res.status(500).json({ sucesso: false, erro: e.message });
+  }
+});
+
+// ============================================================
 // TESTAR
 // ============================================================
 app.get('/api/testar', async (req, res) => {
